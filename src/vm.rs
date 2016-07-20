@@ -15,6 +15,33 @@ macro_rules! die {
     }}
 }
 
+fn op<T: Copy, F: FnOnce(T) -> T>(stack: &mut Vec<T>, f: F) -> T {
+    mutate_op(stack, |stack, x| {
+        let result = f(x);
+        stack.push(result);
+        result
+    })
+}
+
+fn mutate_op<T: Copy, U, F: FnOnce(&mut Vec<T>, T) -> U>(stack: &mut Vec<T>, f: F) -> U {
+    let x = stack.pop().unwrap();
+    f(stack, x)
+}
+
+fn binop<T: Copy, F: FnOnce(T, T) -> T>(stack: &mut Vec<T>, f: F) -> T {
+    mutate_binop(stack, |stack, x, y| {
+        let result = f(x, y);
+        stack.push(result);
+        result
+    })
+}
+
+fn mutate_binop<T: Copy, U, F: FnOnce(&mut Vec<T>, T, T) -> U>(stack: &mut Vec<T>, f: F) -> U {
+    let y = stack.pop().unwrap();
+    let x = stack.pop().unwrap();
+    f(stack, x, y)
+}
+
 fn main() {
     let mut args = env::args_os().skip(1);
     let path = match args.next() {
@@ -57,8 +84,8 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
     // NOTE: this could be significantly faster if we loosened the stack
     // abstraction a bit but forth really is all about stacks.
 
-    while let Some(op) = code.pop() {
-        match op {
+    while let Some(oper) = code.pop() {
+        match oper {
             //print
             0u8 => {
                 // Take the top three items from the stack.
@@ -68,67 +95,58 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
             }
             // +
             1u8 => {
-                let b = stack.pop().unwrap();
-                let d = stack.pop().unwrap();
-                stack.push(b+d);
+                binop(&mut stack, |x, y| x + y);
             }
             // *
             2u8 => {
-                let b = stack.pop().unwrap();
-                let d = stack.pop().unwrap();
-                stack.push(b*d);
+                binop(&mut stack, |x, y| x * y);
             },
             // -
             3u8 => {
-                let b = stack.pop().unwrap();
-                let d = stack.pop().unwrap();
-                stack.push(d-b);
+                binop(&mut stack, |x, y| x - y);
             }
             4u8 => {
-                let b = stack.pop().unwrap();
-                let d = stack.pop().unwrap();
-                stack.push(b/d);
+                binop(&mut stack, |x, y| x / y);
             }
             // %
             5u8 => {
-                let b = stack.pop().unwrap();
-                let d = stack.pop().unwrap();
-                stack.push( d % b );
+                binop(&mut stack, |x, y| x % y);
             }
             // >r
             6u8 => {
-                let b = stack.pop().unwrap();
-                alt_stack.push(b);
+                mutate_op(&mut stack, |_, x| {
+                    alt_stack.push(x);
+                });
             }
             // r>
             7u8 => {
-                let b = alt_stack.pop().unwrap();
-                stack.push(b);
+                mutate_op(&mut alt_stack, |_, x| {
+                    stack.push(x);
+                });
             }
             // ! (store value in variable)
             8u8 => {
-                let name = stack.pop().unwrap();
-                let value = stack.pop().unwrap();
-                variables.insert(name, value);
+                mutate_binop(&mut stack, |_, value, name| {
+                    variables.insert(name, value);
+                });
             }
             // @ (get)
             9u8 => {
-                let name = stack.pop().unwrap();
-                let value = *variables.get(&name).unwrap_or(&0);
-                stack.push(value);
+                op(&mut stack, |name| *variables.get(&name).unwrap_or(&0));
             }
             //dup
             10u8 => {
-                let ab = stack.pop().unwrap();
-                stack.push(ab);
-                stack.push(ab);
+                mutate_op(&mut stack, |stack, x| {
+                    stack.push(x);
+                    stack.push(x);
+                });
             }
             // swap
             11u8 => {
-                let y = stack.pop().unwrap();
-                let u = stack.pop().unwrap();
-                stack.push(y);
-                stack.push(u);
+                mutate_binop(&mut stack, |stack, x, y| {
+                    stack.push(y);
+                    stack.push(x);
+                });
             }
             //rot
             12u8 => {
@@ -176,7 +194,7 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
                     match code.pop().expect("unterminated function") {
                         17u8 => break,
                         18u8 => function_code.push(name),
-                        op => function_code.push(op),
+                        oper => function_code.push(oper),
                     }
                 }
                 function_table[name as usize] = function_code.len();
@@ -204,12 +222,13 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
             }
             //pushn
             21u8 => {
-                let y = code.pop().unwrap();
-                stack.push(y as u32);
+                mutate_op(&mut code, |_, y| {
+                    stack.push(y as u32);
+                });
             }
             //push1..3
             22u8|23u8|24u8 => {
-                let count = op - 21;
+                let count = oper - 21;
                 for _ in 0..count {
                     let z = code.pop().unwrap() as u32;
                     let b = code.pop().unwrap() as u32;
@@ -221,11 +240,11 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
             }
             // if
             25u8 => {
-                let y = stack.pop().unwrap();
-                if y == 0 {
-                    // skip to else.
-                    while code.pop().unwrap() != 26 { }
-                }
+                mutate_op(&mut stack, |_, y| {
+                    if y == 0 {
+                        while code.pop().unwrap() != 26 { }
+                    }
+                });
             }
             // skip over else
             26u8 => while code.pop().unwrap() != 27 { },
@@ -233,47 +252,38 @@ fn forth(mut code: Vec<u8>) -> Vec<u32> {
             27u8 => {},
             // ==
             28u8 => {
-                let y = stack.pop().unwrap();
-                let z = stack.pop().unwrap();
-                stack.push((z == y) as u32);
+                binop(&mut stack, |x, y| (x == y) as u32);
             }
             // >
             29u8 => {
-                let y = stack.pop().unwrap();
-                let z = stack.pop().unwrap();
-                stack.push((z > y) as u32);
+                binop(&mut stack, |x, y| (x > y) as u32);
             }
             // <
             30u8 => {
-                let y = stack.pop().unwrap();
-                let z = stack.pop().unwrap();
-                stack.push((z < y) as u32);
+                binop(&mut stack, |x, y| (x < y) as u32);
             }
             // drop
             31u8 => {
-                stack.pop().unwrap();
+                mutate_op(&mut stack, |_, _| ());
             }
             // Stop
             32u8 => break,
             // r@
             33u8 => {
-                let z = alt_stack.pop().unwrap();
-                stack.push(z);
-                alt_stack.push(z);
+                op(&mut alt_stack, |x| {
+                    stack.push(x);
+                    x
+                });
             }
             // or
             34u8 => {
-                let z = stack.pop().unwrap();
-                let y = stack.pop().unwrap();
-                stack.push((z != 0 || y != 0) as u32)
+                binop(&mut stack, |x, y| (x != 0 || y != 0) as u32);
             }
             // and
             35u8 => {
-                let z = stack.pop().unwrap();
-                let y = stack.pop().unwrap();
-                stack.push((z != 0u32 && y != 0u32) as u32);
+                binop(&mut stack, |x, y| (x != 0 && y != 0) as u32);
             }
-            _ => panic!("unknown op code {}", op),
+            _ => panic!("unknown op code {}", oper),
         }
     }
     stack
